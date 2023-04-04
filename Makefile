@@ -1,7 +1,7 @@
 PREFIX ?= /usr/local
 INSTALL ?= install
 TEST_IMG_NAME ?= wasmtest:latest
-RUNTIMES ?= wasmedge wasmtime
+RUNTIMES ?= wasmtime
 export CONTAINERD_NAMESPACE ?= default
 
 TARGET ?= debug

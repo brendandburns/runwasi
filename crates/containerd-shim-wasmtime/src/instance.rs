@@ -14,6 +14,7 @@ use log::{debug, error};
 use nix::sys::signal::SIGKILL;
 use wasmtime::{Engine, Linker, Module, Store};
 use wasmtime_wasi::{sync::file::File as WasiFile, WasiCtx, WasiCtxBuilder};
+use wasmtime::{Val, ValType};
 
 use super::error::WasmtimeError;
 use super::oci_wasmtime;
@@ -194,6 +195,7 @@ impl Instance for Wasi {
             .map_err(|e| Error::Others(format!("error setting up cgroups: {}", e)))?;
 
         let res = unsafe { exec::fork(Some(cg.as_ref())) }?;
+
         match res {
             exec::Context::Parent(tid, pidfd) => {
                 let mut lr = self.pidfd.lock().unwrap();
@@ -224,13 +226,12 @@ impl Instance for Wasi {
             }
             exec::Context::Child => {
                 // child process
-
-                // TODO: How to get exit code?
-                // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
-                let _ret = match f.call(&mut store, &[], &mut []) {
-                    Ok(_) => std::process::exit(0),
-                    Err(_) => std::process::exit(137),
-                };
+                let args = oci::get_args(&spec);
+                let mut vec_args = std::vec::Vec::new();
+                for arg in args {
+                    vec_args.push(arg.to_string());
+                }
+                invoke_func(&mut store, f, vec_args)
             }
         }
     }
@@ -276,6 +277,36 @@ impl Instance for Wasi {
 
         Ok(())
     }
+}
+
+fn invoke_func<T>(store: &mut Store<T>, func: wasmtime::Func, args: std::vec::Vec<String>) -> Result<u32, Error> {
+    let ty = func.ty(&store);
+    let mut values = Vec::new();
+    let mut args_iter = args.iter();
+    for ty in ty.params() {
+        let val = match args_iter.next() {
+            Some(s) => s,
+            None => panic!("not enough arguments for func"),
+        };
+        values.push(match ty {
+            // TODO: integer parsing here should handle hexadecimal notation
+            // like `0x0...`, but the Rust standard library currently only
+            // parses base-10 representations.
+            ValType::I32 => Val::I32(val.parse().unwrap()),
+            ValType::I64 => Val::I64(val.parse().unwrap()),
+            ValType::F32 => Val::F32(val.parse().unwrap()),
+            ValType::F64 => Val::F64(val.parse().unwrap()),
+            t => panic!("unsupported argument type {:?}", t),
+        });
+    }
+    let mut results = vec![Val::null(); ty.results().len()];
+
+    // TODO: How to get exit code?
+    // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
+    let _ret = match func.call(store, &values, &mut results) {
+        Ok(_) => std::process::exit(0),
+        Err(_) => std::process::exit(137),
+    };
 }
 
 #[cfg(test)]
