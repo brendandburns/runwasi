@@ -92,6 +92,7 @@ pub fn prepare_module(
     debug!("opening rootfs");
     let rootfs = oci_wasmtime::get_rootfs(spec)?;
     let args = oci::get_args(spec);
+    // TODO: if args is empty, set it to [spec.entrypoint]
     let env = oci_wasmtime::env_to_wasi(spec);
 
     debug!("setting up wasi");
@@ -122,7 +123,7 @@ pub fn prepare_module(
     let wctx = wasi_builder.build();
     debug!("wasi context ready");
 
-    let start = args[0].clone();
+    let start = if args.len() > 0 { args[0].clone() } else { "/main.wasm".to_string() };
     let mut iterator = start.split('#');
     let mut cmd = iterator.next().unwrap().to_string();
 
@@ -231,7 +232,8 @@ impl Instance for Wasi {
                 for arg in args {
                     vec_args.push(arg.to_string());
                 }
-                invoke_func(&mut store, f, vec_args)
+                invoke_func(&mut store, f, vec_args, m.2 != "_start")
+                    .or_else(|_| std::process::exit(140))
             }
         }
     }
@@ -279,27 +281,33 @@ impl Instance for Wasi {
     }
 }
 
-fn invoke_func<T>(store: &mut Store<T>, func: wasmtime::Func, args: std::vec::Vec<String>) -> Result<u32, Error> {
+fn invoke_func<T>(store: &mut Store<T>, func: wasmtime::Func, args: std::vec::Vec<String>, params: bool) -> Result<u32, Error> {
     let ty = func.ty(&store);
     let mut values = Vec::new();
-    let mut args_iter = args.iter();
-    for ty in ty.params() {
-        let val = match args_iter.next() {
-            Some(s) => s,
-            None => panic!("not enough arguments for func"),
-        };
-        values.push(match ty {
-            // TODO: integer parsing here should handle hexadecimal notation
-            // like `0x0...`, but the Rust standard library currently only
-            // parses base-10 representations.
-            ValType::I32 => Val::I32(val.parse().unwrap()),
-            ValType::I64 => Val::I64(val.parse().unwrap()),
-            ValType::F32 => Val::F32(val.parse().unwrap()),
-            ValType::F64 => Val::F64(val.parse().unwrap()),
-            t => panic!("unsupported argument type {:?}", t),
-        });
+
+    if params {
+        let mut args_iter = args.iter();
+        args_iter.next();
+
+        for ty in ty.params() {
+            let val = match args_iter.next() {
+                Some(s) => s,
+                None => std::process::exit(138),
+            };
+            values.push(match ty {
+                // TODO: integer parsing here should handle hexadecimal notation
+                // like `0x0...`, but the Rust standard library currently only
+                // parses base-10 representations.
+                ValType::I32 => Val::I32(val.parse().or_else(|_| Err(Error::InvalidArgument(val.clone())))?),
+                ValType::I64 => Val::I64(val.parse().or_else(|_| Err(Error::InvalidArgument(val.clone())))?),
+                ValType::F32 => Val::F32(val.parse().or_else(|_| Err(Error::InvalidArgument(val.clone())))?),
+                ValType::F64 => Val::F64(val.parse().or_else(|_| Err(Error::InvalidArgument(val.clone())))?),
+                _ => std::process::exit(139),
+            });
+        }
     }
     let mut results = vec![Val::null(); ty.results().len()];
+    debug!("calling {:?} args are {:?}\n", func, args);
 
     // TODO: How to get exit code?
     // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
